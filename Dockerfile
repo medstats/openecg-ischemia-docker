@@ -26,7 +26,13 @@ RUN pip install --no-cache-dir \
     pyyaml \
     timm
 
-RUN git clone https://github.com/c-w-k/Electrocardiogram-Digitization.git /workspace/Open-ECG-Digitizer
+# Clone OpenECG Digitizer
+RUN git clone https://github.com/Ahus-AIM/Open-ECG-Digitizer.git /workspace/Open-ECG-Digitizer
+
+# Download OpenECG weights from release
+RUN mkdir -p /workspace/Open-ECG-Digitizer/weights && \
+    curl -L -s -o /workspace/Open-ECG-Digitizer/weights/lead_name_unet_weights_07072025.pt https://github.com/medstats/openecg-ischemia-docker/releases/download/v1.0.0/lead_name_unet_weights_07072025.pt && \
+    curl -L -s -o /workspace/Open-ECG-Digitizer/weights/unet_weights_07072025.pt https://github.com/medstats/openecg-ischemia-docker/releases/download/v1.0.0/unet_weights_07072025.pt
 
 COPY models/ /workspace/models/
 COPY pipeline.py /workspace/pipeline.py
