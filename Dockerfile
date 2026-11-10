@@ -36,6 +36,7 @@ RUN mkdir -p /workspace/Open-ECG-Digitizer/weights && \
 
 COPY models/ /workspace/models/
 COPY pipeline.py /workspace/pipeline.py
+COPY run_all_ecg.py /workspace/run_all_ecg.py
 
 # Download Gustafsson OMI weights
 RUN mkdir -p /workspace/models/gustafsson && \
@@ -43,4 +44,4 @@ RUN mkdir -p /workspace/models/gustafsson && \
      tar -xzf /tmp/gustafsson.tar.gz -C /workspace/models/gustafsson && \
      rm -f /tmp/gustafsson.tar.gz) || true
 
-CMD ["python", "/workspace/pipeline.py", "--help"]
+CMD ["python", "/workspace/run_all_ecg.py", "--help"]
