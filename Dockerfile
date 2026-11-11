@@ -2,7 +2,7 @@ FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 MPLBACKEND=Agg TMPDIR=/storage/emulated/0/tmp
 WORKDIR /workspace
-RUN mkdir -p /storage/emulated/0/tmp && apt-get update && apt-get install -y --no-install-recommends \
+RUN mkdir -p /storage/emulated/0/tmp && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
     git curl ca-certificates libgl1 libglib2.0-0 fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements-inference.txt /workspace/requirements-inference.txt
