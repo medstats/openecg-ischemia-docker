@@ -1,179 +1,73 @@
-# OpenECG Digitization & Myocardial Ischemia Deep Learning Suite
+# OpenECG digitization and ischemia model inference
 
-A production-grade, GPU-accelerated Docker container combining **Open-ECG Paper Digitization** with the leading **clinical deep learning foundation models for Myocardial Ischemia and Occlusion Myocardial Infarction (OMI)**.
+Research inference container: `ghcr.io/medstats/openecg-ischemia-docker:latest`.
+It includes the Open-ECG Digitizer, Chongqing DenseNet, ECG-SMART-NET and the five-fold Gustafsson ensemble. These checkpoints and the paper-to-model transformations have not been clinically validated on this benchmark. Model scores are not interchangeable diagnostic probabilities.
 
-* Container Registry: `ghcr.io/medstats/openecg-ischemia-docker:latest`
-* Vast.ai Template: **`OpenECG-Ischemia-GPU`** (Template ID: `798702`)
-* GitHub Repository: [`medstats/openecg-ischemia-docker`](https://github.com/medstats/openecg-ischemia-docker)
+## Corrected model inputs
 
----
+| Model | Input passed to checkpoint | Preparation |
+| --- | --- | --- |
+| Chongqing | `(1,12,500)` in mV, 500 Hz | One-second QRS-aligned median, R at sample 240 |
+| ECG-SMART-NET | `(1,1,12,500)` in mV, 500 Hz | The same median waveform |
+| Gustafsson | `(1,8,4096)` in mV, 400 Hz | I, II, V1–V6; 0.8 Hz high-pass; ten seconds with centered zero padding; explicit age/sex |
 
-## 1. Integrated Models & Capabilities
+The pipeline preserves observed duration when resampling. It never substitutes zeros for unobserved canonical lead slots or compresses an entire recording into one beat. Constructed medians require at least two complete beats per printed column, at least 75% observed coverage per lead, and a common continuous interval of at least one second. Flat leads, possible clipping and implausible amplitudes are rejected. Local median construction is experimental and differs from the vendor median algorithm used for training.
 
-| Component / Model | Type / Architecture | Input | Primary Outputs |
-| :--- | :--- | :--- | :--- |
-| **Open-ECG Digitizer** | Dual U-Net (Lead detection + Signal segmentation) | Paper ECG photo / scan (PNG, JPG, PDF) | Calibrated 12-lead waveforms at $500\,\text{Hz}$ ($\mu\text{V}$), shape $[12, 5000]$, plus dynamic 3-row / 4-row layout matching |
-| **Gustafsson OMI Ensemble** | 5-Model Deep 1D CNN Ensemble | 12-lead voltage $[12, 5000]$ or $[12, T]$ | **Occlusion Myocardial Infarction (OMI)** probability $[0.0, 1.0]$, ensemble mean, standard deviation / model uncertainty |
-| **Chongqing DenseNet** | 12-Lead 1D DenseNet-121 | 12-lead voltage $[12, 5000]$ or $[12, T]$ | **Acute Myocardial Ischemia / ACS** probability $[0.0, 1.0]$ |
-| **ECG-SMART-NET** | Multi-Branch Residual Spatial-Temporal Net | 12-lead voltage $[12, 5000]$ or $[12, T]$ | **Ischemic ST-T & Infarction Pattern** probability $[0.0, 1.0]$ |
-| **Visual Audit Generator** | Grid & Waveform Alignment Renderer | Original image + Digitized traces | Stacked comparison audit plot (`*_comparison_audit.png`) for visual verification |
+Gustafsson requires a finite native simultaneous recording of at least ten seconds by default. Ordinary 3×4 paper leads do not satisfy this requirement. Explicit research overrides `--gustafsson-short-mode pad` or `cycle-repeat` return an experimental-input warning. They do not recreate a native recording. Age and sex are never silently imputed.
 
----
+## Run on paper images
 
-## 2. Input Data Types
-
-The pipeline accepts:
-1. **Paper ECG Images / Scans:** `.png`, `.jpg`, `.jpeg`, `.pdf` (photographs, scanned records, digital exports).
-2. **Pre-Digitized Raw Arrays:** `.npy`, `.csv`, `.mat` containing $[12, N]$ voltage traces. When raw signals are provided, the digitization stage is safely bypassed and fed directly into the ischemia ensemble.
-
-Directory or single-file inputs are supported:
-```text
-ecg_inputs/
-├── patient_001.png
-├── patient_002.jpg
-├── patient_003_raw.npy
-└── folder_scans/
-    └── patient_004.pdf
-```
-
----
-
-## 3. How to Elicit Inference
-
-### Option A: The Master 1-Command Runner (`run_all_ecg.py`)
-Run the entire end-to-end pipeline (digitization + audit plot + all ischemia models + manifest CSV):
+Supported inputs are PNG, JPEG and WEBP, or a directory containing those images and NPY files (nonrecursive). Verify paper speed and gain from the source ECG and supply both explicitly:
 
 ```bash
-python /workspace/run_all_ecg.py --input /workspace/ecg_inputs --output /workspace/results
+docker pull ghcr.io/medstats/openecg-ischemia-docker:latest
+docker run --rm -v "$PWD/data:/data" -v "$PWD/results:/results" \
+  ghcr.io/medstats/openecg-ischemia-docker:latest \
+  python /workspace/run_all_ecg.py --input /data --output /results \
+  --paper-speed 25 --gain 10 --models chongqing smartnet --device cpu
 ```
 
-For a single file:
+Use `--gpus all` and `--device cuda` for a compatible NVIDIA host. Omit `--models` to request all three models; short paper recordings will then report Gustafsson as `FAILED_INPUT` and the case as `PARTIAL` if the other models succeed. For digitization alone add `--digitize-only`. `pipeline.py` is an alias for the same CLI.
+
+OpenECG source is pinned and patched to retain physical span and trace coordinates. The measured paper width and supplied speed determine the actual sample frequency; the 5000-sample canonical array is not assumed to be 500 Hz. Amplitudes use detected vertical spacing and supplied gain. Layouts and extra rhythm rows are plotted as extracted. If automatic matching chooses an incomplete layout, inference fails. For a visually verified layout, pass a restriction such as `--layout-filter standard_3x4` and inspect the resulting overlay. Automatically assigned rhythm labels are unverified and never overwrite the short classifier channels.
+
+## Run on existing arrays
+
+An NPY must have shape `(12,N)`, ordered I, II, III, aVR, aVL, aVF, V1–V6. Provide a same-stem JSON file, or `--metadata path.json` for a single input. Native example `record.json`:
+
+```json
+{
+  "input_kind": "native",
+  "units": "mV",
+  "sample_rate_hz": 500,
+  "simultaneous": true,
+  "age": 60,
+  "sex": "F"
+}
+```
+
 ```bash
-python /workspace/run_all_ecg.py --input /workspace/ecg_inputs/patient_001.png --output /workspace/results
+python /workspace/run_all_ecg.py --input /data/record.npy --output /results
 ```
 
-Select specific ischemia models:
+Canonical paper arrays use `"input_kind":"canonical"`, explicit units (`uV` or `mV`), measured sample frequency and a `layout_name` such as `standard_3x4`, `standard_3x4_with_r1`, `standard_6x2` or `standard_12x1`. Other layouts need the full OpenECG layout dictionary in `layout`. Canonical slots retain NaNs outside their observed printed columns. Existing aligned arrays made by joining disjoint finite intervals are unsuitable; use their canonical originals. Vendor medians use `"input_kind":"median"` and must already be `(12,500)` at 500 Hz; they bypass median construction and cannot be used for Gustafsson.
+
+PDF, CSV and MAT inputs are not implemented. No unit guessing or lead synthesis is performed.
+
+## Outputs and failures
+
+Each case has `input_metadata.json`, `qc.json` and, when model inference is attempted, `ischemia_predictions.json`. Image cases also save `canonical_uv.npy`, `extracted_rows_uv.npy`, `waveform_overlay.png` (actual traces on aligned source paper), and `comparison_audit.png`. Inspect these overlays before interpreting scores. Actual model arrays are saved as `median_500hz_mv.npy` and/or `gustafsson_input_400hz_mv.npy` when applicable.
+
+The root contains `model_loading.json` and an incrementally checkpointed `master_ecg_ischemia_manifest.csv`. Per-model statuses are `SUCCESS`, `FAILED_INPUT`, `FAILED_INFERENCE` or `UNAVAILABLE`; successful entries include `score_omi` and input construction details. Case status is `SUCCESS`, `PARTIAL`, `FAILED`, or `DIGITIZED_ONLY`. A missing checkpoint is never reported as successful. Exit code is 1 if any case fails or is partial, while successful results remain available. No unvalidated voting threshold or consensus diagnosis is produced.
+
+## Build and verification
+
 ```bash
-python /workspace/run_all_ecg.py \
-    --input /workspace/ecg_inputs \
-    --output /workspace/results \
-    --models gustafsson chongqing smartnet \
-    --audit-dpi 200
+docker build -t openecg-ischemia .
+python -m unittest discover -s tests -v
+python tests/smoke_models.py --models-dir /workspace/models
 ```
 
----
+The Docker build pins dependencies, verifies downloaded weight checksums, runs regression tests and all three real-checkpoint CPU smoke tests, and initializes the digitizer before publishing. Gustafsson's original training checkpoints contain NumPy metadata and require trusted pickle loading; the bundled release archive is checksum verified. Only use trusted replacement checkpoints. GitHub Actions publishes `latest` and the full source commit tag after the build checks pass.
 
-### Option B: Standalone Model Execution
-
-#### 1. Paper ECG Digitization Only (`pipeline.py`)
-```bash
-python /workspace/pipeline.py \
-    --image /workspace/ecg_inputs/patient_001.png \
-    --output-dir /workspace/results/patient_001
-```
-* Generates `signals.npy` ($[12, 5000]$ at $500\,\text{Hz}$) and layout metadata.
-
-#### 2. Running Ischemia Evaluation on Existing `.npy` Signals
-```bash
-python /workspace/pipeline.py \
-    --npy /workspace/signals.npy \
-    --output-dir /workspace/results/ischemia_eval
-```
-* Evaluates Chongqing, SmartNet, and Gustafsson OMI models on the raw waveform and outputs `predictions.json`.
-
----
-
-## 4. Stacked Comparison Audit Plots & Layout Geometry
-
-A critical challenge in ECG digitization is paper layout fidelity:
-* Standard $3\times 4$ ECG recordings without an extended rhythm strip (`standard_3x4`) contain **3 physical rows** of lead tracings on the paper:
-  * Row 1: I, aVR, V1, V4 (2.5 seconds each)
-  * Row 2: II, aVL, V2, V5 (2.5 seconds each)
-  * Row 3: III, aVF, V3, V6 (2.5 seconds each)
-* Forcing a 4th row when no rhythm strip exists causes artificial 2.5s truncated rows and visual distortion.
-* `run_all_ecg.py` dynamically inspects the layout metadata:
-  * **3-Row Layout:** Automatically renders a 3-row comparison grid matching the exact dimensions and order of the original paper sheet.
-  * **4-Row Layout (`standard_3x4_with_rhythm`):** Renders the 3 short rows plus the continuous 10-second lead II rhythm strip below.
-* The resulting audit file (`*_comparison_audit.png`) stacks the original scanned paper ECG directly above the digitized reconstruction, allowing immediate visual quality control before trusting deep learning predictions.
-
----
-
-## 5. Output Manifest & Structure
-
-Running `run_all_ecg.py` creates a structured output folder:
-
-```text
-results/
-├── master_ecg_ischemia_manifest.csv    # Master summary table across all input files
-├── patient_001/
-│   ├── canonical_500hz_uv.npy          # Calibrated [12, 5000] array at 500 Hz (in uV)
-│   ├── patient_001_comparison_audit.png# High-resolution visual audit image
-│   ├── ischemia_predictions.json       # Detailed probabilities & model uncertainties
-│   └── raw_digitization_meta.json      # Bounding boxes & lead detection confidences
-└── patient_002/
-    ├── canonical_500hz_uv.npy
-    ├── patient_002_comparison_audit.png
-    └── ischemia_predictions.json
-```
-
-### Manifest Schema (`master_ecg_ischemia_manifest.csv`)
-
-| Column | Description | Example |
-| :--- | :--- | :--- |
-| `file_name` | Source ECG image or array filename | `patient_001.png` |
-| `status` | Processing status (`SUCCESS` / `FAILED`) | `SUCCESS` |
-| `detected_layout` | Paper geometry identified by OpenECG | `standard_3x4` |
-| `chongqing_ischemia_prob` | Acute ischemia probability (Chongqing DenseNet) | `0.842` |
-| `smartnet_ischemia_prob` | Ischemia / MI probability (ECG-SMART-NET) | `0.791` |
-| `gustafsson_omi_prob` | Occlusion MI probability (5-model ensemble mean) | `0.885` |
-| `gustafsson_model_std` | Inter-model standard deviation / uncertainty | `0.034` |
-| `consensus_ischemia_flag` | High-confidence alert flag ($\ge 2$ models $>0.50$) | `TRUE` |
-| `audit_plot_path` | Absolute path to visual comparison audit | `.../patient_001_comparison_audit.png` |
-| `waveform_npy_path` | Absolute path to digitized $500\,\text{Hz}$ array | `.../canonical_500hz_uv.npy` |
-
----
-
-## 6. Cloud Execution & Environments
-
-### A. Vast.ai (Recommended for High-Throughput Batch Processing)
-Launch an on-demand GPU instance using the pre-configured Vast.ai template:
-1. Open Vast.ai and select Template ID: **`798702`** (**`OpenECG-Ischemia-GPU`**).
-2. Or launch via the Vast.ai CLI:
-   ```bash
-   vastai create instance <MACHINE_ID> \
-       --image ghcr.io/medstats/openecg-ischemia-docker:latest \
-       --disk 30 \
-       --args "python /workspace/run_all_ecg.py --input /workspace/data --output /workspace/results"
-   ```
-
-### B. Google Colab / Kaggle (Single-Cell Run)
-To run directly inside a Colab or Kaggle GPU notebook without installing Docker:
-
-```python
-# 1. Clone repo & setup dependencies
-!git clone https://github.com/medstats/openecg-ischemia-docker.git /content/ecg_suite
-%cd /content/ecg_suite
-!pip install -q timm scikit-image
-
-# 2. Download model checkpoints from GitHub Release
-!mkdir -p /content/ecg_suite/models/gustafsson
-!curl -L -s -o /tmp/gustafsson.tar.gz https://github.com/medstats/openecg-ischemia-docker/releases/download/v1.0.0/gustafsson_models.tar.gz
-!tar -xzf /tmp/gustafsson.tar.gz -C /content/ecg_suite/models/gustafsson && rm -f /tmp/gustafsson.tar.gz
-
-# 3. Clone OpenECG Digitizer weights
-!git clone https://github.com/Ahus-AIM/Open-ECG-Digitizer.git /content/ecg_suite/Open-ECG-Digitizer
-!mkdir -p /content/ecg_suite/Open-ECG-Digitizer/weights
-!curl -L -s -o /content/ecg_suite/Open-ECG-Digitizer/weights/lead_name_unet_weights_07072025.pt https://github.com/medstats/openecg-ischemia-docker/releases/download/v1.0.0/lead_name_unet_weights_07072025.pt
-!curl -L -s -o /content/ecg_suite/Open-ECG-Digitizer/weights/unet_weights_07072025.pt https://github.com/medstats/openecg-ischemia-docker/releases/download/v1.0.0/unet_weights_07072025.pt
-
-# 4. Run full inference
-!python /content/ecg_suite/run_all_ecg.py --input /content/my_ecgs --output /content/results
-```
-
----
-
-## 7. Model Citations & Acknowledgments
-
-* **Open-ECG Digitizer**: Ahus-AIM / CWK (`https://github.com/Ahus-AIM/Open-ECG-Digitizer`).
-* **Gustafsson OMI Ensemble**: Gustafsson et al., *Artificial intelligence for the detection of occlusion myocardial infarction on 12-lead electrocardiograms*.
-* **Chongqing DenseNet & ECG-SMART-NET**: Deep learning architectures for automated myocardial ischemia and ACS detection from standard 12-lead recordings.
+Upstream digitizer: [Ahus-AIM/Open-ECG-Digitizer](https://github.com/Ahus-AIM/Open-ECG-Digitizer). Gustafsson architecture and configuration are included under `models/gustafsson` with their original author information.

@@ -10,9 +10,9 @@ import copy
 import torch
 import torch.nn as nn
 
-from resnet import ResNet1d
-from prediction_stage import LinearPredictionStage
-from age_sex_encoding import AgeSexEncoding
+from .resnet import ResNet1d
+from .prediction_stage import LinearPredictionStage
+from .age_sex_encoding import AgeSexEncoding
 
 
 class ECGModel(nn.Module):

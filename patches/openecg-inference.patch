@@ -1,0 +1,86 @@
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -8,7 +8,13 @@
+ import matplotlib.pyplot as plt
+ import torch
+ import torch.optim.optimizer
+-from ray.tune import Stopper
++try:
++    from ray.tune import Stopper
++except ImportError:
++    class Stopper:
++        """Training-only Ray base is optional for inference."""
++        def __init__(self):
++            raise ImportError("Training EarlyStopper requires ray[tune]; inference does not.")
+ from torch import nn
+ from torch.utils.data import DataLoader
+ from yacs.config import CfgNode as CN
+--- a/src/model/lead_identifier.py
++++ b/src/model/lead_identifier.py
+@@ -415,13 +415,16 @@
+         lines = lines - lines.nanmean(dim=1, keepdim=True)
+         lines = lines * (mv_per_mm / avg_pixel_per_mm) * 1000
+ 
+-        non_nan_samples_per_column = torch.sum(~torch.isnan(lines), dim=0).numpy()
++        non_nan_samples_per_column = torch.sum(~torch.isnan(lines), dim=0).cpu().numpy()
+         first_valid_index: int = int(np.argmax(non_nan_samples_per_column >= self.required_valid_samples))
+         last_valid_index: int = int(np.argmax(non_nan_samples_per_column[::-1] >= self.required_valid_samples))
+         last_valid_index = lines.shape[1] - last_valid_index - 1
+         if first_valid_index <= last_valid_index:
+             lines = lines[:, first_valid_index : last_valid_index + 1]
+ 
++        # Retain calibrated horizontal extent before canonical interpolation.
++        self.last_span_pixels = lines.shape[1] - 1
++        self.last_span_mm = self.last_span_pixels / avg_pixel_per_mm
+         lines = self._interpolate_lines(lines, self.target_num_samples)
+ 
+         return lines
+@@ -476,14 +479,14 @@
+         probs[probs < threshold] = 0
+         detected: list[tuple[str, float, float]] = self._extract_lead_points(probs, self.LEAD_CHANNEL_ORDER)
+         if len(detected) <= 2:
+-            match: dict[str, Any] = {"cost": float("inf")}
+-            canonical_lines: Optional[torch.Tensor] = None
++            match: dict[str, Any] = {"cost": float("inf"), "flip": False}
+         else:
+             match = self._match_layout(detected, rows_in_layout, layouts, self.possibly_flipped)
+ 
+         if "layout" not in match:
+             print(f"No matching layout found, defaulting to first layout: {list(layouts.keys())[0]}")
+             match["layout"] = list(layouts.keys())[0]
++            match["flip"] = False
+ 
+         canonical_lines = self._canonicalize_lines(lines.clone(), match)
+ 
+--- a/src/model/inference_wrapper.py
++++ b/src/model/inference_wrapper.py
+@@ -140,6 +140,9 @@
+ 
+         return {
+             "layout_name": layout_str,
++            "layout_n_detected": layout.get("n_detected", 0),
++            "layout_rows": layout.get("rows_in_layout", 0),
++            "horizontal_span_mm": self.identifier.last_span_pixels * mm_per_pixel_x,
+             "input_image": image.cpu(),
+             "aligned": {
+                 "image": aligned_image.cpu(),
+--- a/src/model/signal_extractor.py
++++ b/src/model/signal_extractor.py
+@@ -218,6 +218,7 @@
+         lines[lines == 0] = float("nan")
+         valid_cols = lines.nan_to_num(0.0).abs().sum(0) > 0
+         first, last = torch.nonzero(valid_cols, as_tuple=True)[0][[0, -1]].tolist()
++        self.last_x_offset = first
+         return lines[:, first : last + 1]
+ 
+     def extract_endpoints(self, lines: torch.Tensor) -> tuple[list[int], list[int], list[float], list[float]]:
+--- a/src/model/dewarper.py
++++ b/src/model/dewarper.py
+@@ -43,6 +43,7 @@
+             optimizer_lr_decay_rate (float): Decay rate for the learning rate.
+             max_num_warp_points (int): Maximum number of control points for ThinPlateSpline fitting.
+         """
++        super().__init__()
+         self.min_peak_distance_factor = min_peak_distance_factor
+         self.abs_peak_threshold = abs_peak_threshold
+         self.direction_norm_threshold = direction_norm_threshold
